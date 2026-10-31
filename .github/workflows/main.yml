@@ -1,0 +1,59 @@
+name: build
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      CLOUDFLARED_VERSION: "2024.12.2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt -r requirements-build.txt
+      - name: Unit tests
+        run: python -m pytest -q
+      - name: Download cloudflared
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/download/$env:CLOUDFLARED_VERSION/cloudflared-windows-amd64.exe" -OutFile cloudflared.exe
+          "cloudflared SHA256: " + (Get-FileHash cloudflared.exe -Algorithm SHA256).Hash
+      - name: Build exe (normal + administrator)
+        shell: pwsh
+        run: |
+          $common = @("--onefile","--noconsole","--add-binary","cloudflared.exe;.",
+            "--collect-all","mcp","--collect-all","uvicorn","--collect-all","pyautogui",
+            "--collect-all","uiautomation","--collect-all","comtypes","--collect-all","mss",
+            "--hidden-import","tkinter","launcher.py")
+          pyinstaller @common --name PC-MCP-Server
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          pyinstaller @common --name PC-MCP-Server-Admin --uac-admin
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Self-test the built exe
+        shell: pwsh
+        run: |
+          $p = Start-Process dist\PC-MCP-Server.exe -ArgumentList "--selftest" -Wait -PassThru
+          $log = "$env:USERPROFILE\.pc_mcp_server\selftest.txt"
+          if (Test-Path $log) { Get-Content $log }
+          $err = "$env:USERPROFILE\.pc_mcp_server\startup_error.txt"
+          if (Test-Path $err) { Get-Content $err }
+          if ($p.ExitCode -ne 0) { Write-Error "selftest failed"; exit 1 }
+      - name: Freeze dependency versions
+        run: pip freeze > frozen-requirements.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frozen-requirements
+          path: frozen-requirements.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          files: |
+            dist/PC-MCP-Server.exe
+            dist/PC-MCP-Server-Admin.exe
